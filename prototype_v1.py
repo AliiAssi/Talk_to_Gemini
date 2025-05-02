@@ -9,10 +9,8 @@ import pyaudio
 import PIL.Image
 import mss
 import argparse
-
 from google import genai
 from google.genai import types
-
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,6 +54,7 @@ class AudioLoop:
         self.audio_in_queue = None
         self.out_queue = None
         self.session = None
+        self.is_first_frame = True  # Track whether this is the first frame
 
     def _get_frame(self, cap):
         ret, frame = cap.read()
@@ -147,10 +146,16 @@ class AudioLoop:
             chunk = await self.audio_in_queue.get()
             await asyncio.to_thread(stream.write, chunk)
 
+    async def send_initial_prompt(self):
+        """Send an initial text prompt to start the conversation."""
+        initial_prompt = "Hello! I'm your AI assistant. I'll analyze what I see on your screen and provide helpful suggestions and insights. Let me take a look at what you're working on."
+        await self.session.send_realtime_input(text=initial_prompt)
+        print("\n[Sent initial greeting...]")
+
     async def periodic_suggestions(self):
         """Periodically stream frames with text prompts for analysis and recommendations."""
-        # Use a local flag to track if we've sent the initial prompt
-        initial_prompt_sent = False
+        # Send an initial prompt right away
+        await self.send_initial_prompt()
         
         while True:
             now = time.time()
@@ -160,17 +165,16 @@ class AudioLoop:
                 raw = buf.getvalue()
                 blob = types.Blob(data=raw, mime_type="image/jpeg")
                 
-                # Check if this is the first prompt we're sending
-                if not initial_prompt_sent:
-                    prompt = "Hello! I'm your AI assistant. I'll analyze what I see on your screen and provide helpful suggestions and insights. Let me take a look at what you're working on."
-                    initial_prompt_sent = True
-                    print("\n[Sending initial greeting with first frame...]")
+                # Define the prompt based on whether this is the first frame or a subsequent one
+                if self.is_first_frame:
+                    prompt = "Please analyze what you see on the screen and provide an initial assessment with helpful suggestions."
+                    self.is_first_frame = False
                 else:
                     prompt = "Based on what you can see now, please provide updated recommendations or insights if anything has changed."
-                    print("\n[Streaming frame for periodic analysis...]")
                 
                 # Send the text prompt first
                 await self.session.send_realtime_input(text=prompt)
+                print(f"\n[Streaming frame for analysis with prompt: '{prompt}']")
                 
                 # Then send the frame
                 await self.session.send_realtime_input(media=blob)
