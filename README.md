@@ -2,7 +2,7 @@
 
 This is a prototype that streams audio and video (from webcam or screen), sends it to **Google Gemini 2.0 Flash (Live API)**, and receives real-time AI-generated audio responses.
 
-> Voice + Vision + Gemini in real-time.
+> Voice + Vision + Gemini in real-time + Analysis and Recommendations.
 
 ---
 

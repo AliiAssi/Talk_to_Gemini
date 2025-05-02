@@ -15,6 +15,7 @@ import asyncio
 import base64
 import io
 import traceback
+import time
 
 import cv2
 import pyaudio
@@ -26,19 +27,23 @@ import argparse
 from google import genai
 from google.genai import types
 
-FORMAT = pyaudio.paInt16
+FORMAT = pyaudio.paInt16 # 
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE = 1024
+CHUNK_SIZE = 1024 #audio processing variable
 
 MODEL = "models/gemini-2.0-flash-live-001"
 
-DEFAULT_MODE = "camera"
+
+DEFAULT_MODE = "screen"
+
+# Time interval in seconds for proactive suggestions
+DEFAULT_SUGGESTION_INTERVAL = 30 #seconds
 
 client = genai.Client(
     http_options={"api_version": "v1beta"},
-    api_key="your api key"
+    api_key="AIzaSyCex6BkIKAtPP3WpMHBcw0PvskrmUAwrhw"
 )
 
 
@@ -59,8 +64,11 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE):
+    def __init__(self, video_mode=DEFAULT_MODE, suggestion_interval=DEFAULT_SUGGESTION_INTERVAL):
         self.video_mode = video_mode
+        self.suggestion_interval = suggestion_interval
+        self.last_suggestion_time = 0
+        self.frame_for_analysis = None
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -82,17 +90,17 @@ class AudioLoop:
             await self.session.send(input=text or ".", end_of_turn=True)
 
     def _get_frame(self, cap):
-        # Read the frameq
+        # Read the frame
         ret, frame = cap.read()
         # Check if the frame was read successfully
         if not ret:
             return None
-        # Fix: Convert BGR to RGB color space
-        # OpenCV captures in BGR but PIL expects RGB format
-        # This prevents the blue tint in the video feed
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = PIL.Image.fromarray(frame_rgb)  # Now using RGB frame
         img.thumbnail([1024, 1024])
+
+        # Store frame for analysis
+        self.frame_for_analysis = img.copy()
 
         image_io = io.BytesIO()
         img.save(image_io, format="jpeg")
@@ -131,6 +139,9 @@ class AudioLoop:
         image_bytes = mss.tools.to_png(i.rgb, i.size)
         img = PIL.Image.open(io.BytesIO(image_bytes))
 
+        # Store frame for analysis
+        self.frame_for_analysis = img.copy()
+
         image_io = io.BytesIO()
         img.save(image_io, format="jpeg")
         image_io.seek(0)
@@ -139,7 +150,6 @@ class AudioLoop:
         return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
 
     async def get_screen(self):
-
         while True:
             frame = await asyncio.to_thread(self._get_screen)
             if frame is None:
@@ -203,6 +213,33 @@ class AudioLoop:
             bytestream = await self.audio_in_queue.get()
             await asyncio.to_thread(stream.write, bytestream)
 
+    async def periodic_suggestions(self):
+        """Periodically analyze frames and provide proactive suggestions."""
+        while True:
+            current_time = time.time()
+            # Check if it's time for a suggestion
+            if current_time - self.last_suggestion_time >= self.suggestion_interval and self.frame_for_analysis is not None:
+                # Create a prompt for frame analysis
+                prompt = "Based on what you see in this frame, can you provide a helpful suggestion or observation? Be concise and natural."
+                
+                # Prepare the frame for sending
+                image_io = io.BytesIO()
+                self.frame_for_analysis.save(image_io, format="jpeg")
+                image_io.seek(0)
+                image_bytes = image_io.read()
+                frame_data = {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}
+                
+                # Send the frame with the proactive prompt
+                print("\n[Proactive suggestion incoming...]")
+                await self.session.send(input=frame_data)
+                await self.session.send(input=prompt, end_of_turn=True)
+                
+                # Update the last suggestion time
+                self.last_suggestion_time = current_time
+            
+            # Wait before checking again
+            await asyncio.sleep(5)  # Check every 5 seconds
+
     async def run(self):
         try:
             async with (
@@ -224,6 +261,9 @@ class AudioLoop:
 
                 tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
+                
+                # Add the periodic suggestions task
+                tg.create_task(self.periodic_suggestions())
 
                 await send_text_task
                 raise asyncio.CancelledError("User requested exit")
@@ -244,6 +284,12 @@ if __name__ == "__main__":
         help="pixels to stream from",
         choices=["camera", "screen", "none"],
     )
+    parser.add_argument(
+        "--suggestion-interval",
+        type=int,
+        default=DEFAULT_SUGGESTION_INTERVAL,
+        help="Time interval in seconds between proactive suggestions",
+    )
     args = parser.parse_args()
-    main = AudioLoop(video_mode=args.mode)
+    main = AudioLoop(video_mode=args.mode, suggestion_interval=args.suggestion_interval)
     asyncio.run(main.run())
