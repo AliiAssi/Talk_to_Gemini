@@ -47,8 +47,8 @@ CONFIG = types.LiveConnectConfig(
 
 pya = pyaudio.PyAudio()
 
-class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, suggestion_interval=DEFAULT_SUGGESTION_INTERVAL):
+class ScreenAnalyzer:
+    def __init__(self, video_mode=DEFAULT_MODE, suggestion_interval=DEFAULT_SUGGESTION_INTERVAL, message_callback=None):
         self.video_mode = video_mode
         self.suggestion_interval = suggestion_interval
         self.last_suggestion_time = 0
@@ -56,29 +56,9 @@ class AudioLoop:
         self.audio_in_queue = None
         self.out_queue = None
         self.session = None
-
-    def _get_frame(self, cap):
-        ret, frame = cap.read()
-        if not ret:
-            return None
-        # Convert BGR->RGB, thumbnail, and store
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)
-        img.thumbnail([1024, 1024])
-        self.frame_for_analysis = img.copy()
-        buf = io.BytesIO()
-        img.save(buf, format="jpeg")
-        return {"mime_type": "image/jpeg", "data": base64.b64encode(buf.getvalue()).decode()}
-
-    async def get_frames(self):
-        cap = await asyncio.to_thread(cv2.VideoCapture, 0)
-        while True:
-            frame = await asyncio.to_thread(self._get_frame, cap)
-            if frame is None:
-                break
-            await asyncio.sleep(1.0)
-            await self.out_queue.put(frame)
-        cap.release()
+        self.context_history = []  # Store previous context for smarter recommendations
+        self.audio_stream = None
+        self.message_callback = message_callback  # Callback for web interface
 
     def _get_screen(self):
         sct = mss.mss()
@@ -96,7 +76,7 @@ class AudioLoop:
             frame = await asyncio.to_thread(self._get_screen)
             if frame is None:
                 break
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)  # Reduced sleep time for more responsive analysis
             await self.out_queue.put(frame)
 
     async def send_realtime(self):
@@ -131,6 +111,9 @@ class AudioLoop:
                     self.audio_in_queue.put_nowait(data)
                 elif text := response.text:
                     print(text, end="")
+                    # Send to web interface if callback available
+                    if self.message_callback and text.strip():
+                        await self.message_callback(text.strip())
             # clear audio queue on interrupt
             while not self.audio_in_queue.empty():
                 self.audio_in_queue.get_nowait()
@@ -147,11 +130,31 @@ class AudioLoop:
             chunk = await self.audio_in_queue.get()
             await asyncio.to_thread(stream.write, chunk)
 
-    async def periodic_suggestions(self):
-        """Periodically stream frames with text prompts for analysis and recommendations."""
-        # Use a local flag to track if we've sent the initial prompt
-        initial_prompt_sent = False
+    async def smart_analysis(self):
+        """Proactively analyze screen content and provide intelligent suggestions."""
+        # Initial system prompt to set the analyzer's behavior
+        system_prompt = """You are an intelligent screen analyzer that provides helpful, 
+        contextual suggestions based on what you see on the user's screen.
         
+        Focus on:
+        1. Identifying what the user is doing.
+        2. Suggesting useful shortcuts, tips, or improvements.
+        3. Being concise and non-intrusive.
+        4. Using minimal simple words.
+        5. Adapting to context - only mention significant changes.
+        6. Being helpful without being annoying.
+        
+        Keep suggestions brief and actionable."""
+        
+        # Send initial system prompt once
+        await self.session.send_realtime_input(text=system_prompt)
+        await asyncio.sleep(2)
+        
+        # Send welcome message
+        welcome = "Hello! I'm your intelligent screen assistant. I'll be analyzing your screen periodically and offering helpful suggestions."
+        await self.session.send_realtime_input(text=welcome)
+        
+        # Start periodic analysis
         while True:
             now = time.time()
             if now - self.last_suggestion_time >= self.suggestion_interval and self.frame_for_analysis:
@@ -160,23 +163,22 @@ class AudioLoop:
                 raw = buf.getvalue()
                 blob = types.Blob(data=raw, mime_type="image/jpeg")
                 
-                # Check if this is the first prompt we're sending
-                if not initial_prompt_sent:
-                    prompt = "Hello! I'm your Game assistant."
-                    initial_prompt_sent = True
-                    print("\n[Sending initial greeting with first frame...]")
-                else:
-                    prompt = "Based on what you can see now, please provide updated game recommendations if anything has changed."
-                    print("\n[Streaming frame for periodic analysis...]")
+                # Create a context-aware prompt
+                prompt = """Analyze this screen and provide one brief, helpful suggestion.
+                Be specific about what you see and keep your response under 3 sentences.
+                Only mention significant changes or opportunities for improvement."""
                 
-                # Send the text prompt first
+                print("\n[Analyzing screen content...]")
+                
+                # Send the analysis prompt
                 await self.session.send_realtime_input(text=prompt)
                 
-                # Then send the frame
+                # Send the current frame for analysis
                 await self.session.send_realtime_input(media=blob)
+                
                 self.last_suggestion_time = now
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)  # Check more frequently than the suggestion interval
 
     async def run(self):
         try:
@@ -188,42 +190,43 @@ class AudioLoop:
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
-                # Tasks for audio/video I/O
+                # Core tasks for I/O
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
-                if self.video_mode == "camera":
-                    tg.create_task(self.get_frames())
-                elif self.video_mode == "screen":
-                    tg.create_task(self.get_screen())
+                tg.create_task(self.get_screen())
                 tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
                 
-                # Task for periodic analysis and recommendations
-                tg.create_task(self.periodic_suggestions())
+                # Smart analysis task
+                tg.create_task(self.smart_analysis())
 
                 # Block until cancelled
                 await asyncio.Future()
         except asyncio.CancelledError:
-            pass
+            if self.audio_stream:
+                self.audio_stream.close()
+            raise  # Re-raise to properly handle cancellation
         except ExceptionGroup as eg:
-            self.audio_stream.close()
+            if self.audio_stream:
+                self.audio_stream.close()
             traceback.print_exception(eg)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Intelligent Screen Analyzer with Proactive Suggestions")
     parser.add_argument(
         "--mode",
         type=str,
         default=DEFAULT_MODE,
-        choices=["camera", "screen", "none"],
-        help="pixels to stream from",
+        choices=["screen", "camera", "none"],
+        help="Source for analysis: screen, camera, or none",
     )
     parser.add_argument(
         "--suggestion-interval",
         type=int,
         default=DEFAULT_SUGGESTION_INTERVAL,
-        help="Seconds between streaming frames",
+        help="Seconds between providing suggestions",
     )
     args = parser.parse_args()
-    main = AudioLoop(video_mode=args.mode, suggestion_interval=args.suggestion_interval)
-    asyncio.run(main.run())
+    analyzer = ScreenAnalyzer(video_mode=args.mode, suggestion_interval=args.suggestion_interval)
+    print(f"Screen Analyzer starting - providing suggestions every {args.suggestion_interval} seconds")
+    asyncio.run(analyzer.run())

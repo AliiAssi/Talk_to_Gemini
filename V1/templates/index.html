@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Game Assistant</title>
+    <style>
+        #preview { display: none; }
+        button { 
+            padding: 15px 30px; 
+            font-size: 18px;
+            margin: 20px;
+        }
+    </style>
+</head>
+<body>
+    <button onclick="startAssistant()" id="startBtn">Start Assistant</button>
+    <video id="preview"></video>
+    <audio id="audioPlayer"></audio>
+
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let mediaStream;
+        let captureInterval;
+
+        async function startAssistant() {
+            try {
+                // Request screen share 
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { frameRate: 0.05 },
+                    audio: true
+                });
+
+                // Setup preview
+                const video = document.getElementById('preview');
+                video.srcObject = mediaStream;
+                video.play();
+
+                // Notify server to start analysis
+                socket.emit('start_analysis');
+
+                // Set up frame capture
+                captureInterval = setInterval(() => captureFrame(video), 20000);
+                document.getElementById('startBtn').disabled = true;
+
+            } catch (error) {
+                console.error("Capture failed:", error);
+            }
+        }
+
+        function captureFrame(video) {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            
+            canvas.toBlob(blob => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    socket.emit('frame', {
+                        data: reader.result.split(',')[1]
+                    });
+                };
+                reader.readAsDataURL(blob);
+            }, 'image/jpeg', 0.8);
+        }
+
+        // Handle audio responses
+        socket.on('audio_response', ({ data }) => {
+            const audioBlob = new Blob([Uint8Array.from(atob(data), c => c.charCodeAt(0))], {
+                type: 'audio/mp3'
+            });
+            const audioPlayer = document.getElementById('audioPlayer');
+            audioPlayer.src = URL.createObjectURL(audioBlob);
+            audioPlayer.play();
+        });
+
+        // Cleanup
+        window.addEventListener('beforeunload', () => {
+            if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+            clearInterval(captureInterval);
+        });
+    </script>
+</body>
+</html>
