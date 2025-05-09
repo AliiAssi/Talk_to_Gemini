@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
-# Audio parameters
+# Audio parameters (this will be in the frontend)
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
@@ -180,15 +180,16 @@ class ScreenAnalyzer:
                 asyncio.TaskGroup() as tg,
             ):
                 self.session = session
+                # print(self.session)
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
                 # Core tasks for I/O
                 tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio())
-                tg.create_task(self.get_screen())
+                tg.create_task(self.listen_audio()) # it is the frontend task
+                tg.create_task(self.get_screen()) # it is the frontend task
                 tg.create_task(self.receive_audio())
-                tg.create_task(self.play_audio())
+                tg.create_task(self.play_audio()) # it is the frontend task
                 
                 # Smart analysis task
                 tg.create_task(self.smart_analysis())
@@ -203,21 +204,6 @@ class ScreenAnalyzer:
             traceback.print_exception(eg)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Intelligent Screen Analyzer with Proactive Suggestions")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default=DEFAULT_MODE,
-        choices=["screen", "camera", "none"],
-        help="Source for analysis: screen, camera, or none",
-    )
-    parser.add_argument(
-        "--suggestion-interval",
-        type=int,
-        default=DEFAULT_SUGGESTION_INTERVAL,
-        help="Seconds between providing suggestions",
-    )
-    args = parser.parse_args()
-    analyzer = ScreenAnalyzer(video_mode=args.mode, suggestion_interval=args.suggestion_interval)
-    print(f"Screen Analyzer starting - providing suggestions every {args.suggestion_interval} seconds")
+    analyzer = ScreenAnalyzer(video_mode="screen")
+    print(f"Screen Analyzer starting - providing suggestions every 20 seconds")
     asyncio.run(analyzer.run())

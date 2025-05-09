@@ -1,0 +1,5 @@
+flask
+flask-socketio
+python-dotenv
+google-generativeai
+google-genai
